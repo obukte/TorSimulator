@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=65.5.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tor-simulator"
+version = "0.1.0"
+description = "Educational onion routing simulator (Tor-like)"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [ { name = "Omer Bukte" } ]
+dependencies = [
+"cryptography>=44.0.1",
+"requests"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,174 @@
+Metadata-Version: 2.4
+Name: tor-simulator
+Version: 0.1.0
+Summary: Educational onion routing simulator (Tor-like)
+Author: Omer Bukte
+License: MIT
+Description-Content-Type: text/markdown
+Requires-Dist: cryptography>=44.0.1
+Requires-Dist: requests
+
+# Tor Simulator
+
+This Tor-like onion routing simulator is designed for hands-on learning and rapid experimentation with Tor’s core concepts—without needing a central directory server or real Tor network. Instead of querying a directory authority, each relay self-registers by appending its address and port to a shared nodes_directory.json file, enabling clients to discover peers dynamically. Circuits consist of three hops (Entry → Middle → Exit), each hop performing an ephemeral Diffie‑Hellman handshake over plain HTTP (no TLS), deriving symmetric AES‑128 keys with HKDF, and onion‑encrypting/decrypting payloads in fixed‑size cells.
+
+Logging is color‑coded per node, so you can visually trace how data moves through the network. Onion‑layer creation (CREATE) and extension (RELAY_EXTEND) are fully simulated, and a simple CLI or GUI drives auto‑build and message‑fetch flows.
+
+
+---
+
+## Features
+
+* Builds **3‑hop circuits** (Entry → Middle → Exit) using ephemeral Diffie–Hellman key exchanges.
+* Onion‑encrypts HTTP requests through multiple hops and decrypts them on return.
+* Simple CLI (`main.py`) and optional GUI (`scripts/gui_circuit_builder.py`) interfaces.
+* All traffic over **HTTP only**—no HTTPS or TLS in the simulated data path.
+
+---
+
+## 🔗 References
+
+* **Original Tor Paper**: *"Tor: The Second-Generation Onion Router"* by Dingledine et al.
+  [https://www.usenix.org/legacy/events/sec05/tech/full\_papers/dingledine/dingledine.pdf](https://www.usenix.org/legacy/events/sec05/tech/full_papers/dingledine/dingledine.pdf)
+
+* **Tor Browser**: Official project homepage and downloads.
+  [https://www.torproject.org/projects/torbrowser.html](https://www.torproject.org/projects/torbrowser.html)
+
+* **Batching & Mix Taxonomy**: Overview of mix-network batching strategies in various mix types. This simulator implements only the **timed flush** strategy described here.
+  [https://www.freehaven.net/doc/batching-taxonomy/taxonomy.pdf](https://www.freehaven.net/doc/batching-taxonomy/taxonomy.pdf)
+
+---
+
+## Project Structure
+
+```
+tor-simulator/
+├── README.md               ← This file
+├── LICENSE
+├── requirements.txt        ← Python dependencies (cryptography, requests)
+│
+├── src/                    ← Source code (installable package)
+│   └── tor_simulator/      
+│       ├── __init__.py
+│       ├── cell.py         ← Definition & parsing of fixed‑size Tor "cells"
+│       ├── encryption_utils.py ← AES‑128 CBC encrypt/decrypt + padding
+│       ├── logger.py       ← Colorized console logging utilities
+│       └── node.py         ← Core `Node` class implementing relay behavior
+│
+├── scripts/                ← Utility scripts and GUI frontends
+│   └── gui_circuit_builder.py ← Tkinter GUI for interactive circuit building
+│
+├── tests/                  ← Automated tests
+│   ├── test_circuit.py     ← 3‑hop circuit & HTTP fetch tests
+│   └── test_local_fetch.py ← Spins up a local HTTP server to verify message forwarding
+└── main.py                 ← Simple CLI example: auto‑build & fetch URL
+```
+
+---
+
+## Class & Module Overview
+
+### `cell.py`
+
+* **Constants**: `CELL_SIZE`, command codes (`CMD_CREATE`, `CMD_RELAY`, …) and sub-commands (`RELAY_EXTEND`, `RELAY_DATA`, …).
+* **`create_cell()`**: Packs a circuit ID, command, and payload into a fixed‑length cell.
+* **`parse_cell()`**: Unpacks a raw 512‑byte cell into its components.
+
+### `encryption_utils.py`
+
+* AES‑128 CBC encryption/decryption with PKCS7 padding.
+* Functions: `encrypt(plaintext, key) → ciphertext`, and `decrypt(ciphertext, key) → plaintext`.
+
+### `logger.py`
+
+* Provides `colored_log(tag, message, color)` for pretty console output.
+* Defines ANSI color list and helper `LogColors` enum.
+
+### `node.py` (Core)
+
+#### `Node` class
+
+* **Attributes**:
+
+  * `server`: Listening socket for incoming cells.
+  * `circuit_state`: Map `circuit_id → { 'key': AES key, 'up': upstream socket, 'down': downstream socket }`.
+  * `mix_queues`, `flush_threads`: For timed mixing of packets.
+
+* **Initialization**:
+
+  1. Generate global DH parameters once (`DH_PARAMETERS`).
+  2. Open TCP socket, bind to host/port, start accept loop.
+  3. Register self in `nodes_directory.json`.
+
+* **`start()`**: Launches listener thread and saves node info to the directory file.
+
+* **Cell Handlers**:
+
+  * `._handle_create(cid, payload, conn)`:
+
+    1. Load client’s DH public key from `payload`.
+    2. Generate ephemeral private key `priv = dh_params.generate_private_key()`.
+    3. Compute `secret = priv.exchange(client_pub)` and derive `AES key = HKDF(secret)`.
+    4. Store symmetric key in `circuit_state[cid]['key']`.
+    5. Send back `CMD_CREATED` with this node’s public key.
+
+  * `._handle_relay(cid, payload, conn)`: On `RELAY_EXTEND` sub-command
+
+    1. Peel one layer of encryption with `circuit_state[cid]['key']`.
+    2. If downstream is none, interpret extension request: connect to next hop, create new DH handshake as above, queue `RELAY_EXTENDED` back upstream.
+    3. Otherwise forward data cells downstream or upstream, onion‑encrypting/decrypting as needed.
+
+* **`auto_build_random_circuit(hops_count, max_retries)`**:
+
+  1. Load available nodes from directory.
+  2. Choose N random hops, assign a new circuit ID.
+  3. Perform the **CREATE** + **RELAY\_EXTEND** sequence over one TCP connection (to entry node), peeling/unpeeling layers to establish all hop keys.
+
+* **`fetch_url(url)`**:
+
+  1. Formats a basic HTTP GET request for the path and host.
+  2. Sends it as a `RELAY_DATA` onion packet.
+  3. Receives multiple `RELAY_DATA` / `RELAY_END` cells, reassembles and decrypts the response.
+  4. Parses JSON bodies and returns a Python `dict`.
+
+### `gui_circuit_builder.py`
+
+* A Tkinter application with three steps:
+
+  1. **Start Nodes**: Launch X relays locally.
+  2. **Select Hops**: Pick exactly N nodes from a list; builds a circuit.
+  3. **Fetch Message**: Serves user‑entered text on a local HTTP server (`/message.json`) and retrieves it via the onion circuit.
+
+---
+
+## ⚙️ Getting Started
+
+1. **Install dependencies**:
+
+   ```sh
+   pip install -r requirements.txt
+   ```
+2. **Run tests**:
+
+   ```sh
+   python -m unittest discover tests
+   ```
+3. **CLI example**:
+
+   ```sh
+   python main.py 3 http://httpbin.org/ip
+   ```
+4. **GUI**:
+
+   ```sh
+   python scripts/gui_circuit_builder.py
+   ```
+
+
+
+## 📜 License
+
+This project is released under the [MIT License](LICENSE).
+
+```
+```
